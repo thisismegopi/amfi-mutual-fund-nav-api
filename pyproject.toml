@@ -1,0 +1,18 @@
+[project]
+name = "amfi-api"
+version = "0.1.0"
+description = "AMFI Mutual Fund NAV API — fetch live NAV data by Scheme Code, ISIN, or Scheme Name"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.136.1",
+    "httpx>=0.28.1",
+    "pydantic>=2.13.4",
+    "uvicorn>=0.47.0",
+]
+
+[project.scripts]
+serve = "main:app"
+
+[tool.uv]
+dev-dependencies = []
