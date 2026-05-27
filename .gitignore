@@ -42,3 +42,6 @@ logs/
 
 # OS
 desktop.ini
+
+# cache 
+amfi_cache.db

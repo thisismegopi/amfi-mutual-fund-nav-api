@@ -15,6 +15,7 @@ class FundRecord(BaseModel):
     nav_date: Optional[str] = Field(None, description="Date of the NAV (DD-MMM-YYYY)")
     fund_house: Optional[str] = Field(None, description="Name of the Asset Management Company (AMC)")
     category: Optional[str] = Field(None, description="Scheme category (e.g., Equity, Debt, Hybrid)")
+    scheme_type: Optional[str] = Field(None, description="Scheme type: Open Ended, Close Ended, or Interval")
 
     class Config:
         json_schema_extra = {
@@ -27,6 +28,7 @@ class FundRecord(BaseModel):
                 "nav_date": "22-May-2026",
                 "fund_house": "Aditya Birla Sun Life Mutual Fund",
                 "category": "Debt Scheme - Banking and PSU Fund",
+                "scheme_type": "Open Ended",
             }
         }
 
@@ -38,10 +40,24 @@ class SingleFundResponse(BaseModel):
 
 
 class SearchResponse(BaseModel):
-    query: str
-    total_results: int
+    query: Optional[str]
+    fund_house: Optional[str]
+    category: Optional[str]
+    scheme_type: Optional[str]
+    page: int
     limit: int
+    total_results: int
+    total_pages: int
     data: List[FundRecord]
+    source: str
+    cached: bool
+
+
+class BulkLookupResponse(BaseModel):
+    found: List[FundRecord]
+    not_found: List[str]
+    total_requested: int
+    total_found: int
     source: str
     cached: bool
 

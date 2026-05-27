@@ -1,28 +1,33 @@
 """
 AMFIDataFetcher
 ---------------
-Downloads and parses the AMFI NAVAll.txt file, builds lookup indexes,
-and provides a simple cache with a configurable TTL.
+Downloads and parses the AMFI NAVAll.txt file, builds in-memory lookup indexes,
+and persists parsed data to SQLite so the cache survives process restarts.
 """
 
 import httpx
 import time
-from typing import Optional, Dict, List
+import datetime
+import os
+import aiosqlite
+from typing import Optional, Dict, List, Tuple
 from models import FundRecord
 
 
 AMFI_URL = "https://portal.amfiindia.com/spages/NAVAll.txt"
+DEFAULT_DB_PATH = os.getenv("DB_PATH", "./amfi_cache.db")
 
 
 class AMFIDataFetcher:
     CACHE_TTL = 3600  # 1 hour
 
-    def __init__(self):
+    def __init__(self, db_path: str = DEFAULT_DB_PATH):
+        self._db_path = db_path
         self._records: List[FundRecord] = []
-        # Indexes for O(1) lookup
         self._by_scheme_code: Dict[str, FundRecord] = {}
         self._by_isin: Dict[str, FundRecord] = {}
         self._fetched_at: Optional[float] = None
+        self._db_initialized = False
 
     # ------------------------------------------------------------------
     # Public helpers
@@ -37,7 +42,6 @@ class AMFIDataFetcher:
     def last_fetched_at(self) -> Optional[str]:
         if self._fetched_at is None:
             return None
-        import datetime
         return datetime.datetime.utcfromtimestamp(self._fetched_at).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     def cache_age_seconds(self) -> Optional[float]:
@@ -55,22 +59,173 @@ class AMFIDataFetcher:
     def get_by_isin(self, isin: str) -> Optional[FundRecord]:
         return self._by_isin.get(isin)
 
-    def search_by_name(self, query: str, limit: int = 20) -> List[FundRecord]:
-        q = query.lower()
-        return [r for r in self._records if q in r.scheme_name.lower()][:limit]
+    def search(
+        self,
+        query: Optional[str] = None,
+        fund_house: Optional[str] = None,
+        category: Optional[str] = None,
+        scheme_type: Optional[str] = None,
+        page: int = 1,
+        limit: int = 20,
+    ) -> Tuple[List[FundRecord], int]:
+        results = self._records
+
+        if query:
+            q = query.lower()
+            results = [r for r in results if q in r.scheme_name.lower()]
+        if fund_house:
+            fh = fund_house.lower()
+            results = [r for r in results if r.fund_house and fh in r.fund_house.lower()]
+        if category:
+            cat = category.lower()
+            results = [r for r in results if r.category and cat in r.category.lower()]
+        if scheme_type:
+            st = scheme_type.lower()
+            results = [r for r in results if r.scheme_type and st in r.scheme_type.lower()]
+
+        total = len(results)
+        offset = (page - 1) * limit
+        return results[offset : offset + limit], total
+
+    def get_bulk_by_scheme_codes(self, codes: List[str]) -> Tuple[List[FundRecord], List[str]]:
+        found, not_found = [], []
+        for code in codes:
+            record = self._by_scheme_code.get(code.strip())
+            if record:
+                found.append(record)
+            else:
+                not_found.append(code.strip())
+        return found, not_found
+
+    def get_bulk_by_isins(self, isins: List[str]) -> Tuple[List[FundRecord], List[str]]:
+        found, not_found = [], []
+        for isin in isins:
+            record = self._by_isin.get(isin.strip().upper())
+            if record:
+                found.append(record)
+            else:
+                not_found.append(isin.strip())
+        return found, not_found
+
+    def get_all_fund_houses(self) -> List[str]:
+        return sorted({r.fund_house for r in self._records if r.fund_house})
+
+    def get_all_categories(self) -> List[str]:
+        return sorted({r.category for r in self._records if r.category})
+
+    def get_all_scheme_types(self) -> List[str]:
+        return sorted({r.scheme_type for r in self._records if r.scheme_type})
 
     # ------------------------------------------------------------------
     # Cache management
     # ------------------------------------------------------------------
 
     async def ensure_data_loaded(self):
-        """Load data if not cached or cache has expired."""
-        if self._fetched_at is None or (time.time() - self._fetched_at) > self.CACHE_TTL:
+        if self._fetched_at is not None and (time.time() - self._fetched_at) <= self.CACHE_TTL:
+            return
+        await self._ensure_db()
+        db_ts = await self._get_db_timestamp()
+        if db_ts and (time.time() - db_ts) <= self.CACHE_TTL:
+            await self._load_from_db()
+            self._fetched_at = db_ts
+        else:
             await self._fetch_and_parse()
 
     async def force_refresh(self) -> int:
+        await self._ensure_db()
         await self._fetch_and_parse()
         return len(self._records)
+
+    # ------------------------------------------------------------------
+    # SQLite persistence
+    # ------------------------------------------------------------------
+
+    async def _ensure_db(self):
+        if self._db_initialized:
+            return
+        async with aiosqlite.connect(self._db_path) as db:
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS cache_meta (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    fetched_at REAL NOT NULL
+                )
+            """)
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS nav_records (
+                    scheme_code TEXT PRIMARY KEY,
+                    isin_div_payout_growth TEXT,
+                    isin_div_reinvestment TEXT,
+                    scheme_name TEXT NOT NULL,
+                    nav REAL,
+                    nav_date TEXT,
+                    fund_house TEXT,
+                    category TEXT,
+                    scheme_type TEXT
+                )
+            """)
+            await db.commit()
+        self._db_initialized = True
+
+    async def _get_db_timestamp(self) -> Optional[float]:
+        async with aiosqlite.connect(self._db_path) as db:
+            async with db.execute("SELECT fetched_at FROM cache_meta WHERE id = 1") as cur:
+                row = await cur.fetchone()
+                return row[0] if row else None
+
+    async def _load_from_db(self):
+        records: List[FundRecord] = []
+        by_code: Dict[str, FundRecord] = {}
+        by_isin: Dict[str, FundRecord] = {}
+
+        async with aiosqlite.connect(self._db_path) as db:
+            async with db.execute("SELECT * FROM nav_records") as cur:
+                async for row in cur:
+                    r = FundRecord(
+                        scheme_code=row[0],
+                        isin_div_payout_growth=row[1],
+                        isin_div_reinvestment=row[2],
+                        scheme_name=row[3],
+                        nav=row[4],
+                        nav_date=row[5],
+                        fund_house=row[6],
+                        category=row[7],
+                        scheme_type=row[8],
+                    )
+                    records.append(r)
+                    by_code[r.scheme_code] = r
+                    if r.isin_div_payout_growth:
+                        by_isin[r.isin_div_payout_growth.upper()] = r
+                    if r.isin_div_reinvestment:
+                        by_isin[r.isin_div_reinvestment.upper()] = r
+
+        self._records = records
+        self._by_scheme_code = by_code
+        self._by_isin = by_isin
+
+    async def _save_to_db(self, records: List[FundRecord], fetched_at: float):
+        async with aiosqlite.connect(self._db_path) as db:
+            await db.execute("DELETE FROM nav_records")
+            await db.executemany(
+                "INSERT INTO nav_records VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                [
+                    (
+                        r.scheme_code,
+                        r.isin_div_payout_growth,
+                        r.isin_div_reinvestment,
+                        r.scheme_name,
+                        r.nav,
+                        r.nav_date,
+                        r.fund_house,
+                        r.category,
+                        r.scheme_type,
+                    )
+                    for r in records
+                ],
+            )
+            await db.execute(
+                "INSERT OR REPLACE INTO cache_meta (id, fetched_at) VALUES (1, ?)", (fetched_at,)
+            )
+            await db.commit()
 
     # ------------------------------------------------------------------
     # Internal: fetch & parse
@@ -83,10 +238,14 @@ class AMFIDataFetcher:
             raw_text = response.text
 
         records, by_code, by_isin = self._parse(raw_text)
+        fetched_at = time.time()
+
         self._records = records
         self._by_scheme_code = by_code
         self._by_isin = by_isin
-        self._fetched_at = time.time()
+        self._fetched_at = fetched_at
+
+        await self._save_to_db(records, fetched_at)
 
     @staticmethod
     def _parse(raw: str):
@@ -96,31 +255,35 @@ class AMFIDataFetcher:
 
         current_category = None
         current_fund_house = None
+        current_scheme_type = None
 
         for line in raw.splitlines():
             line = line.strip()
             if not line:
                 continue
 
-            # ---- Category header (e.g. "Open Ended Schemes(Equity Scheme - Large Cap Fund)")
-            if line.startswith("Open Ended") or line.startswith("Close Ended") or line.startswith("Interval"):
-                # Extract category name between parentheses if present
-                if "(" in line and ")" in line:
-                    current_category = line[line.index("(") + 1 : line.index(")")]
-                else:
-                    current_category = line
+            # Scheme-type / category header lines
+            if line.startswith("Open Ended"):
+                current_scheme_type = "Open Ended"
+                current_category = line[line.index("(") + 1 : line.index(")")] if "(" in line else line
+                continue
+            if line.startswith("Close Ended"):
+                current_scheme_type = "Close Ended"
+                current_category = line[line.index("(") + 1 : line.index(")")] if "(" in line else line
+                continue
+            if line.startswith("Interval"):
+                current_scheme_type = "Interval"
+                current_category = line[line.index("(") + 1 : line.index(")")] if "(" in line else line
                 continue
 
-            # ---- Column header row
             if line.startswith("Scheme Code;"):
                 continue
 
-            # ---- Fund house name (single token without semicolons)
+            # Fund house name (no semicolons)
             if ";" not in line:
                 current_fund_house = line
                 continue
 
-            # ---- Data row
             parts = line.split(";")
             if len(parts) < 5:
                 continue
@@ -132,13 +295,11 @@ class AMFIDataFetcher:
             nav_raw = parts[4].strip()
             nav_date = parts[5].strip() if len(parts) > 5 else None
 
-            # Sanitise ISIN dashes
             if isin_growth == "-":
                 isin_growth = None
             if isin_reinvest == "-":
                 isin_reinvest = None
 
-            # Parse NAV to float
             try:
                 nav_value = float(nav_raw) if nav_raw and nav_raw != "N.A." else None
             except ValueError:
@@ -153,6 +314,7 @@ class AMFIDataFetcher:
                 nav_date=nav_date,
                 fund_house=current_fund_house,
                 category=current_category,
+                scheme_type=current_scheme_type,
             )
 
             records.append(record)
