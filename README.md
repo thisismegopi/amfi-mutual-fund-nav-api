@@ -14,7 +14,6 @@ Built with **[uv](https://github.com/astral-sh/uv)** — the fast Python package
 - **Meta endpoint** — discover all valid fund houses, categories, and scheme types
 - **SQLite-backed persistent cache** — survives process restarts; re-fetches from AMFI only when stale
 - **Per-IP rate limiting** (via slowapi)
-- **Optional API key auth** — enabled by setting the `API_KEYS` env var
 
 ---
 
@@ -67,7 +66,6 @@ All configuration is via environment variables.
 
 | Variable    | Default              | Description                                                   |
 |-------------|----------------------|---------------------------------------------------------------|
-| `API_KEYS`  | *(unset — open)*     | Comma-separated list of valid API keys. If unset, all requests are allowed. |
 | `DB_PATH`   | `./amfi_cache.db`    | Path to the SQLite cache database.                            |
 
 Cache TTL and the AMFI source URL are constants in `data_fetcher.py`.
@@ -90,18 +88,6 @@ Cache TTL and the AMFI source URL are constants in `data_fetcher.py`.
 | `/fund/bulk/*`, `/meta`| 30 / minute |
 
 Exceeding a limit returns **HTTP 429**.
-
-### API Key Auth
-
-If `API_KEYS` is set, every request must include the key as a header:
-
-```
-X-Api-Key: your-key-here
-```
-
-Missing or invalid keys return **HTTP 401**.
-
----
 
 ### `GET /fund/scheme/{scheme_code}`
 

@@ -1,20 +1,19 @@
 """
 AMFI Mutual Fund NAV API
 Fetches live NAV data from AMFI India and exposes lookup, search, filter,
-bulk, and meta endpoints with per-IP rate limiting and optional API key auth.
+bulk, and meta endpoints with per-IP rate limiting.
 """
 
 import math
-import os
 from typing import Optional
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
 from data_fetcher import AMFIDataFetcher
-from models import BulkLookupResponse, ErrorResponse, FundRecord, SearchResponse, SingleFundResponse
+from models import BulkLookupResponse, SearchResponse, SingleFundResponse
 
 # ---------------------------------------------------------------------------
 # Rate limiter (per IP)
@@ -36,21 +35,6 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 fetcher = AMFIDataFetcher()
 
-# ---------------------------------------------------------------------------
-# API key auth
-# Set API_KEYS env var to a comma-separated list to enable enforcement.
-# If unset, all requests are allowed.
-# ---------------------------------------------------------------------------
-_API_KEYS = {k.strip() for k in os.getenv("API_KEYS", "").split(",") if k.strip()}
-
-
-async def verify_api_key(x_api_key: Optional[str] = Header(None)):
-    if _API_KEYS and x_api_key not in _API_KEYS:
-        raise HTTPException(
-            status_code=401,
-            detail="Invalid or missing API key. Pass it as the X-Api-Key header.",
-        )
-
 
 # ---------------------------------------------------------------------------
 # Routes
@@ -64,14 +48,14 @@ async def root():
         "version": "2.0.0",
         "docs": "/docs",
         "endpoints": {
-            "by_scheme_code":  "/fund/scheme/{scheme_code}",
-            "by_isin":         "/fund/isin/{isin}",
-            "search":          "/fund/search",
-            "bulk_by_codes":   "/fund/bulk/scheme?codes=xxx,yyy",
-            "bulk_by_isins":   "/fund/bulk/isin?isins=INF...,INF...",
-            "meta":            "/meta",
-            "cache_status":    "/cache/status",
-            "refresh_cache":   "/cache/refresh",
+            "by_scheme_code": "/fund/scheme/{scheme_code}",
+            "by_isin": "/fund/isin/{isin}",
+            "search": "/fund/search",
+            "bulk_by_codes": "/fund/bulk/scheme?codes=xxx,yyy",
+            "bulk_by_isins": "/fund/bulk/isin?isins=INF...,INF...",
+            "meta": "/meta",
+            "cache_status": "/cache/status",
+            "refresh_cache": "/cache/refresh",
         },
     }
 
@@ -81,7 +65,6 @@ async def root():
     response_model=SingleFundResponse,
     summary="Get fund by Scheme Code",
     tags=["Fund Lookup"],
-    dependencies=[Depends(verify_api_key)],
 )
 @limiter.limit("100/minute")
 async def get_by_scheme_code(request: Request, scheme_code: str):
@@ -93,8 +76,12 @@ async def get_by_scheme_code(request: Request, scheme_code: str):
     await fetcher.ensure_data_loaded()
     record = fetcher.get_by_scheme_code(scheme_code.strip())
     if not record:
-        raise HTTPException(status_code=404, detail=f"No fund found with Scheme Code '{scheme_code}'.")
-    return SingleFundResponse(data=record, source="amfiindia.com", cached=fetcher.is_cached())
+        raise HTTPException(
+            status_code=404, detail=f"No fund found with Scheme Code '{scheme_code}'."
+        )
+    return SingleFundResponse(
+        data=record, source="amfiindia.com", cached=fetcher.is_cached()
+    )
 
 
 @app.get(
@@ -102,7 +89,6 @@ async def get_by_scheme_code(request: Request, scheme_code: str):
     response_model=SingleFundResponse,
     summary="Get fund by ISIN",
     tags=["Fund Lookup"],
-    dependencies=[Depends(verify_api_key)],
 )
 @limiter.limit("100/minute")
 async def get_by_isin(request: Request, isin: str):
@@ -115,8 +101,12 @@ async def get_by_isin(request: Request, isin: str):
     await fetcher.ensure_data_loaded()
     record = fetcher.get_by_isin(isin.strip().upper())
     if not record:
-        raise HTTPException(status_code=404, detail=f"No fund found with ISIN '{isin}'.")
-    return SingleFundResponse(data=record, source="amfiindia.com", cached=fetcher.is_cached())
+        raise HTTPException(
+            status_code=404, detail=f"No fund found with ISIN '{isin}'."
+        )
+    return SingleFundResponse(
+        data=record, source="amfiindia.com", cached=fetcher.is_cached()
+    )
 
 
 @app.get(
@@ -124,13 +114,16 @@ async def get_by_isin(request: Request, isin: str):
     response_model=SearchResponse,
     summary="Search and filter funds",
     tags=["Fund Lookup"],
-    dependencies=[Depends(verify_api_key)],
 )
 @limiter.limit("60/minute")
 async def search_funds(
     request: Request,
-    q: Optional[str] = Query(None, min_length=3, description="Partial scheme name (min 3 chars)"),
-    fund_house: Optional[str] = Query(None, description="Partial AMC / fund house name filter"),
+    q: Optional[str] = Query(
+        None, min_length=3, description="Partial scheme name (min 3 chars)"
+    ),
+    fund_house: Optional[str] = Query(
+        None, description="Partial AMC / fund house name filter"
+    ),
     category: Optional[str] = Query(None, description="Partial category filter"),
     scheme_type: Optional[str] = Query(
         None,
@@ -180,7 +173,6 @@ async def search_funds(
     response_model=BulkLookupResponse,
     summary="Bulk lookup by Scheme Codes",
     tags=["Bulk Lookup"],
-    dependencies=[Depends(verify_api_key)],
 )
 @limiter.limit("30/minute")
 async def bulk_by_scheme_codes(
@@ -214,7 +206,6 @@ async def bulk_by_scheme_codes(
     response_model=BulkLookupResponse,
     summary="Bulk lookup by ISINs",
     tags=["Bulk Lookup"],
-    dependencies=[Depends(verify_api_key)],
 )
 @limiter.limit("30/minute")
 async def bulk_by_isins(
@@ -247,7 +238,6 @@ async def bulk_by_isins(
     "/meta",
     summary="List all filter values",
     tags=["Meta"],
-    dependencies=[Depends(verify_api_key)],
 )
 @limiter.limit("30/minute")
 async def meta(request: Request):
